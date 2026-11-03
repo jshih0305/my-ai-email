@@ -1,6 +1,9 @@
 import { isAuthorized, unauthorized } from "@/lib/cron-auth";
 import { isBrief, sendBrief } from "@/lib/send-brief";
 
+// 即時產生晨報（抓資料 + OpenAI）約需 20~30 秒，放寬執行時間上限
+export const maxDuration = 60;
+
 // POST /api/send-brief（前端按鈕用，同步等寄信結果）
 // Header：Authorization: Bearer <CRON_SECRET>
 // body 可帶前端已載入的晨報（避免重新呼叫 OpenAI）；沒帶就在伺服器重新產生
