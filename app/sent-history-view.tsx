@@ -176,6 +176,7 @@ export default function SentHistoryView() {
               <BriefDetail
                 brief={{
                   weather: selected.weather,
+                  market: selected.market,
                   stock: selected.stock,
                   news: selected.news,
                   summary: selected.summary,

@@ -1,8 +1,10 @@
 import type { NewsItem, StockDay, Summary, Weather } from "@/lib/daily-brief";
+import type { Market, Quote } from "@/lib/market";
 
 export type BriefData = {
   weather: Weather | null;
-  stock: StockDay | null;
+  market?: Market | null;
+  stock?: StockDay | null; // 舊紀錄才有
   news: NewsItem[];
   summary: Summary | null;
   errors?: Record<string, string>;
@@ -52,6 +54,74 @@ function ErrorNote({ text }: { text?: string }) {
   return <p className="text-sm text-red-600 dark:text-red-400">取得失敗：{text}</p>;
 }
 
+/** 2026-11-06 -> 11/06 */
+const md = (d: string) => d.slice(5).replace("-", "/");
+
+/** 一列行情：名稱/日期在左，收盤與漲跌在右（台股慣例：漲紅跌綠） */
+function MarketRow({
+  name,
+  sub,
+  quote,
+  error,
+}: {
+  name: string;
+  sub?: string | null;
+  quote?: Quote | null;
+  error?: string;
+}) {
+  const color = !quote
+    ? ""
+    : quote.change > 0
+      ? "text-red-600 dark:text-red-400"
+      : quote.change < 0
+        ? "text-green-600 dark:text-green-400"
+        : "";
+  const arrow = !quote ? "" : quote.change > 0 ? "▲" : quote.change < 0 ? "▼" : "";
+  return (
+    <div className="flex items-center justify-between gap-4 py-3 first:pt-0">
+      <div className="min-w-0">
+        <div className="font-medium">{name}</div>
+        {quote ? (
+          <div className="text-xs text-zinc-500 dark:text-zinc-400">{sub}</div>
+        ) : (
+          <ErrorNote text={error ?? "無資料"} />
+        )}
+      </div>
+      {quote && (
+        <div className="shrink-0 text-right tabular-nums">
+          <div className="text-xl font-semibold">{quote.close.toLocaleString()}</div>
+          <div className={`text-sm font-semibold ${color}`}>
+            {arrow}
+            {Math.abs(quote.change).toLocaleString()}（{quote.changePct.toFixed(2)}%）
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** 新聞上方的小標籤：國際/台灣、類別、來源 */
+function NewsTags({ tags }: { tags: (string | undefined)[] }) {
+  const list = tags.filter(Boolean) as string[];
+  if (!list.length) return null;
+  return (
+    <div className="mb-1 flex flex-wrap gap-1.5">
+      {list.map((t, i) => (
+        <span
+          key={`${i}-${t}`}
+          className={`rounded-full px-2 py-0.5 text-xs ${
+            i === 0 && t === "國際"
+              ? "bg-sky-100 text-sky-800 dark:bg-sky-900/50 dark:text-sky-200"
+              : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
+          }`}
+        >
+          {t}
+        </span>
+      ))}
+    </div>
+  );
+}
+
 const fmtTime = (iso: string) =>
   new Intl.DateTimeFormat("zh-TW", {
     timeZone: "Asia/Taipei",
@@ -62,7 +132,7 @@ const fmtTime = (iso: string) =>
 
 /** 顯示一份晨報的完整內容（天氣、股價、新聞、鼓勵） */
 export default function BriefDetail({ brief }: { brief: BriefData }) {
-  const { weather, stock, news = [], summary, errors } = brief;
+  const { weather, market, stock, news = [], summary, errors } = brief;
   const up = (stock?.change ?? 0) > 0;
   const down = (stock?.change ?? 0) < 0;
   // 台股慣例：漲紅跌綠
@@ -101,7 +171,36 @@ export default function BriefDetail({ brief }: { brief: BriefData }) {
           <AiNote text={summary?.weatherSummary} />
         </Card>
 
-        {/* 股價 */}
+        {/* 市場：台指期夜盤、費半、道瓊（舊紀錄沒有 market，改顯示台積電） */}
+        {market || !stock ? (
+          <Card title="台指期夜盤・美股" icon="📊">
+            <div className="divide-y divide-zinc-100 dark:divide-zinc-800">
+              <MarketRow
+                name="台指期夜盤"
+                sub={
+                  market?.night
+                    ? `${market.night.sessionStart ? `${md(market.night.sessionStart)} 15:00 ~ ` : ""}${md(market.night.date)} 05:00・${market.night.volume.toLocaleString()} 口`
+                    : undefined
+                }
+                quote={market?.night}
+                error={errors?.night}
+              />
+              <MarketRow
+                name="費城半導體"
+                sub={market?.sox && `美國 ${md(market.sox.date)}`}
+                quote={market?.sox}
+                error={errors?.sox}
+              />
+              <MarketRow
+                name="道瓊工業"
+                sub={market?.dji && `美國 ${md(market.dji.date)}`}
+                quote={market?.dji}
+                error={errors?.dji}
+              />
+            </div>
+            <AiNote text={summary?.marketSummary} />
+          </Card>
+        ) : (
         <Card
           title={`${stock?.name ?? "台積電"} ${stock?.stockNo ?? "2330"}・${stock?.date ?? ""}`}
           icon="📈"
@@ -132,14 +231,18 @@ export default function BriefDetail({ brief }: { brief: BriefData }) {
           )}
           <AiNote text={summary?.stockSummary} />
         </Card>
+        )}
       </div>
 
-      {/* AI 精選新聞 */}
-      {summary?.newsSummary?.length ? (
-        <Card title="AI 精選科技新聞" icon="🤖">
-          <ul className="space-y-4">
+      {/* 新聞：AI 挑選的重點；AI 失敗時退回顯示最新標題 */}
+      <Card title="今日重點新聞" icon="📰">
+        {summary?.newsSummary?.length ? (
+          <ul className="space-y-5">
             {summary.newsSummary.map((n) => (
               <li key={n.link}>
+                <NewsTags
+                  tags={[n.scope, n.category, news.find((x) => x.link === n.link)?.source]}
+                />
                 <a
                   href={n.link}
                   target="_blank"
@@ -154,14 +257,9 @@ export default function BriefDetail({ brief }: { brief: BriefData }) {
               </li>
             ))}
           </ul>
-        </Card>
-      ) : null}
-
-      {/* 全部新聞 */}
-      <Card title="科技新聞（RSS）" icon="📰">
-        {news.length ? (
+        ) : news.length ? (
           <ul className="divide-y divide-zinc-100 dark:divide-zinc-800">
-            {news.map((n) => (
+            {news.slice(0, 8).map((n) => (
               <li key={n.link} className="flex items-start justify-between gap-4 py-2.5">
                 <a href={n.link} target="_blank" rel="noopener noreferrer" className="hover:underline">
                   {n.title}

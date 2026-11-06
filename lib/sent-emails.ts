@@ -1,6 +1,7 @@
 import { connectDB } from "@/lib/mongodb";
 import { SentEmailModel } from "@/models/SentEmail";
 import type { NewsItem, StockDay, Summary, Weather } from "@/lib/daily-brief";
+import type { Market } from "@/lib/market";
 
 // 對外公開的欄位（不含收件人/寄件人信箱與 Resend ID）
 export type SentEmailItem = {
@@ -10,7 +11,8 @@ export type SentEmailItem = {
   error?: string;
   briefDate: string;
   weather: Weather | null;
-  stock: StockDay | null;
+  market: Market | null;
+  stock: StockDay | null; // 舊紀錄才有
   news: NewsItem[];
   summary: Summary | null;
   briefErrors?: Record<string, string>;
@@ -39,7 +41,7 @@ export async function listSentEmails({
   const docs = await SentEmailModel.find(filter)
     .sort({ createdAt: -1 })
     .limit(limit + 1)
-    .select("subject status error briefDate weather stock news summary briefErrors createdAt")
+    .select("subject status error briefDate weather market stock news summary briefErrors createdAt")
     .lean();
 
   const hasMore = docs.length > limit;
@@ -50,6 +52,7 @@ export async function listSentEmails({
     error: d.error ?? undefined,
     briefDate: d.briefDate,
     weather: (d.weather as Weather) ?? null,
+    market: (d.market as Market) ?? null,
     stock: (d.stock as StockDay) ?? null,
     news: (d.news as NewsItem[]) ?? [],
     summary: (d.summary as Summary) ?? null,

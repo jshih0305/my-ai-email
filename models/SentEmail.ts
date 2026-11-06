@@ -12,7 +12,8 @@ const SentEmailSchema = new Schema(
 
     briefDate: { type: String, required: true, index: true }, // YYYY-MM-DD
     weather: { type: Schema.Types.Mixed },
-    stock: { type: Schema.Types.Mixed },
+    market: { type: Schema.Types.Mixed }, // 台指期夜盤、費半、道瓊
+    stock: { type: Schema.Types.Mixed }, // 舊紀錄：台積電股價
     news: { type: [Schema.Types.Mixed], default: [] },
     summary: { type: Schema.Types.Mixed },
     briefErrors: { type: Schema.Types.Mixed },

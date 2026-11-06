@@ -1,4 +1,5 @@
 import type { DailyBrief } from "@/lib/daily-brief";
+import type { Quote } from "@/lib/market";
 
 // 所有外部文字都要跳脫，避免破壞 HTML
 const esc = (v: unknown) =>
@@ -49,8 +50,44 @@ function statRow(cells: [string, string][]) {
     .join("")}</tr></table>`;
 }
 
+/** 2026-11-06 -> 11/06 */
+const md = (d: string) => d.slice(5).replace("-", "/");
+
+const signed = (q: Quote) => {
+  const arrow = q.change > 0 ? "▲" : q.change < 0 ? "▼" : "";
+  return `${arrow}${Math.abs(q.change).toLocaleString()}（${q.changePct.toFixed(2)}%）`;
+};
+
+function marketRow(
+  name: string,
+  sub: string | null | undefined,
+  q: Quote | null,
+  error?: string,
+  last = false,
+) {
+  const border = last ? "" : "border-bottom:1px solid #f4f4f5;";
+  if (!q) {
+    return `<tr><td colspan="2" style="padding:10px 0;${border}">
+      <div style="font-size:15px;font-weight:600;color:#18181b">${esc(name)}</div>${errNote(error)}</td></tr>`;
+  }
+  const color = q.change > 0 ? "#dc2626" : q.change < 0 ? "#16a34a" : "#18181b";
+  return `<tr>
+    <td style="padding:10px 0;${border}">
+      <div style="font-size:15px;font-weight:600;color:#18181b">${esc(name)}</div>
+      <div style="font-size:12px;color:#71717a;margin-top:2px">${esc(sub ?? "")}</div>
+    </td>
+    <td align="right" style="padding:10px 0;${border}white-space:nowrap">
+      <div style="font-size:18px;font-weight:700;color:#18181b">${q.close.toLocaleString()}</div>
+      <div style="font-size:13px;font-weight:600;color:${color}">${esc(signed(q))}</div>
+    </td>
+  </tr>`;
+}
+
+const textQuote = (name: string, q: Quote | null) =>
+  q ? `【${name} ${q.date}】${q.close.toLocaleString()} ${signed(q)}` : `【${name}】取得失敗`;
+
 export function renderBriefEmail(b: DailyBrief): { subject: string; html: string; text: string } {
-  const { weather: w, stock: s, news, summary, errors } = b;
+  const { weather: w, market: m, news, summary, errors } = b;
 
   // ----- 鼓勵 -----
   const encouragement = `
@@ -76,55 +113,47 @@ export function renderBriefEmail(b: DailyBrief): { subject: string; html: string
        ])}${aiNote(summary?.weatherSummary)}`
     : errNote(errors?.weather);
 
-  // ----- 股價（台股：漲紅跌綠）-----
-  let stockBody = errNote(errors?.stock);
-  if (s) {
-    const color = s.change > 0 ? "#dc2626" : s.change < 0 ? "#16a34a" : "#18181b";
-    const arrow = s.change > 0 ? "▲" : s.change < 0 ? "▼" : "";
-    const prev = s.close - s.change;
-    const pct = prev ? ((s.change / prev) * 100).toFixed(2) : "0.00";
-    stockBody = `
-      <p style="margin:0 0 8px">
-        <span style="font-size:26px;font-weight:700;color:#18181b">${s.close.toLocaleString()}</span>
-        <span style="font-size:15px;font-weight:600;color:${color};margin-left:8px">${arrow}${Math.abs(
-          s.change,
-        ).toLocaleString()}（${pct}%）</span>
-      </p>
-      ${statRow([
-        ["開盤", s.open.toLocaleString()],
-        ["最高", s.high.toLocaleString()],
-        ["最低", s.low.toLocaleString()],
-        ["成交量(張)", Math.round(s.volume / 1000).toLocaleString()],
-      ])}${aiNote(summary?.stockSummary)}`;
-  }
+  // ----- 市場：台指期夜盤、費半、道瓊（台股慣例：漲紅跌綠）-----
+  const n = m.night;
+  const marketBody = `
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+      ${marketRow(
+        "台指期夜盤",
+        n &&
+          `${n.sessionStart ? `${md(n.sessionStart)} 15:00 ~ ` : ""}${md(n.date)} 05:00・${n.volume.toLocaleString()} 口`,
+        n,
+        errors?.night,
+      )}
+      ${marketRow("費城半導體", m.sox && `美國 ${md(m.sox.date)}`, m.sox, errors?.sox)}
+      ${marketRow("道瓊工業", m.dji && `美國 ${md(m.dji.date)}`, m.dji, errors?.dji, true)}
+    </table>${aiNote(summary?.marketSummary)}`;
 
-  // ----- AI 精選新聞 -----
-  const picks = summary?.newsSummary?.length
-    ? section(
-        "🤖 AI 精選科技新聞",
-        summary.newsSummary
-          .map(
-            (n) => `
-        <div style="margin-bottom:14px">
+  // ----- 新聞：AI 挑選的重點；AI 失敗時退回顯示最新標題 -----
+  const sourceOf = new Map(news.map((n) => [n.link, n.source]));
+  const picks = summary?.newsSummary ?? [];
+  const newsBody = picks.length
+    ? picks
+        .map((n) => {
+          const tags = [n.scope, n.category, sourceOf.get(n.link)].filter(Boolean).join("・");
+          return `
+        <div style="margin-bottom:16px">
+          ${tags ? `<div style="font-size:12px;color:#71717a;margin-bottom:2px">${esc(tags)}</div>` : ""}
           <a href="${safeUrl(n.link)}" style="font-size:15px;font-weight:600;color:#4338ca;text-decoration:none">${esc(n.title)}</a>
           <p style="margin:4px 0 0;font-size:14px;line-height:1.7;color:#52525b">${esc(n.summary)}</p>
-        </div>`,
+        </div>`;
+        })
+        .join("")
+    : news.length
+      ? `<ul style="margin:0;padding-left:18px">${news
+          .slice(0, 8)
+          .map(
+            (n) =>
+              `<li style="margin-bottom:8px;font-size:14px;line-height:1.6"><a href="${safeUrl(
+                n.link,
+              )}" style="color:#18181b">${esc(n.title)}</a></li>`,
           )
-          .join(""),
-      )
-    : "";
-
-  // ----- 全部新聞 -----
-  const newsBody = news.length
-    ? `<ul style="margin:0;padding-left:18px">${news
-        .map(
-          (n) =>
-            `<li style="margin-bottom:8px;font-size:14px;line-height:1.6"><a href="${safeUrl(
-              n.link,
-            )}" style="color:#18181b">${esc(n.title)}</a></li>`,
-        )
-        .join("")}</ul>`
-    : errNote(errors?.news ?? "今天沒有新聞");
+          .join("")}</ul>`
+      : errNote(errors?.news ?? "今天沒有新聞");
 
   const html = `<!DOCTYPE html>
 <html lang="zh-Hant-TW">
@@ -143,9 +172,8 @@ export function renderBriefEmail(b: DailyBrief): { subject: string; html: string
         </td></tr>
         ${encouragement}
         ${section(`🌤️ 今日天氣・${esc(w?.location ?? "台北")}`, weatherBody)}
-        ${section(`📈 台積電 2330・${esc(s?.date ?? "")}`, stockBody)}
-        ${picks}
-        ${section("📰 今日科技新聞", newsBody)}
+        ${section("📊 台指期夜盤・美股", marketBody)}
+        ${section("📰 今日重點新聞", newsBody)}
         <tr><td style="padding:8px 24px 28px;font-size:12px;color:#a1a1aa;text-align:center">
           由 my-ai-email 自動產生・股價資訊僅供參考，非投資建議
         </td></tr>
@@ -164,10 +192,15 @@ export function renderBriefEmail(b: DailyBrief): { subject: string; html: string
     w
       ? `【天氣・${w.location}】${w.description}，${w.minTemp}~${w.maxTemp}°C，降雨 ${w.rainChance}%`
       : "【天氣】取得失敗",
-    s ? `【台積電 ${s.date}】收盤 ${s.close}，漲跌 ${s.change}` : "【台積電】取得失敗",
+    textQuote("台指期夜盤", m.night),
+    textQuote("費城半導體", m.sox),
+    textQuote("道瓊工業", m.dji),
+    summary?.marketSummary ? `AI 摘要：${summary.marketSummary}` : "",
     "",
-    "【科技新聞】",
-    ...news.map((n) => `- ${n.title} ${n.link}`),
+    "【今日重點新聞】",
+    ...(picks.length
+      ? picks.map((n) => `- ${n.scope ? `[${n.scope}] ` : ""}${n.title}\n  ${n.summary}\n  ${n.link}`)
+      : news.slice(0, 8).map((n) => `- ${n.title} ${n.link}`)),
   ].join("\n");
 
   return { subject: `☀️ 每日晨報 ${b.date}`, html, text };

@@ -1,5 +1,6 @@
 import OpenAI from "openai";
 import Parser from "rss-parser";
+import { getNightFutures, getUSIndex, type Market, type Quote } from "@/lib/market";
 
 const TZ = "Asia/Taipei";
 
@@ -51,7 +52,7 @@ export async function getWeather(): Promise<Weather> {
   };
 }
 
-// ---------- 股價：證交所 TWSE STOCK_DAY（免 token） ----------
+// ---------- 舊版台積電股價（只用來顯示舊的寄送紀錄） ----------
 
 export type StockDay = {
   stockNo: string;
@@ -65,120 +66,109 @@ export type StockDay = {
   volume: number;
 };
 
-const num = (s: string) => Number(s.replace(/,/g, "").replace(/^X/, ""));
+// ---------- 新聞：多個 RSS 來源，交給 AI 挑重點 ----------
 
-/** 民國日期 115/11/02 -> 2026-11-02 */
-const rocToIso = (s: string) => {
-  const [y, m, d] = s.split("/");
-  return `${Number(y) + 1911}-${m}-${d}`;
-};
+export type NewsItem = { title: string; link: string; pubDate: string; source?: string };
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const FEEDS = [
+  { source: "TechNews 科技新報", url: "https://technews.tw/feed/" },
+  { source: "iThome", url: "https://www.ithome.com.tw/rss" }, // 資安新聞多
+  { source: "中央社 科技", url: "https://feeds.feedburner.com/rsscna/technology" },
+  { source: "中央社 財經", url: "https://feeds.feedburner.com/rsscna/finance" },
+];
 
-async function fetchTwseMonth(stockNo: string, yyyymm01: string, retries = 1) {
-  const url = `https://www.twse.com.tw/exchangeReport/STOCK_DAY?response=json&date=${yyyymm01}&stockNo=${stockNo}`;
+const NEWS_WINDOW_MS = 24 * 3600_000; // 晨報在早上寄，「今天」的新聞還很少，改抓過去 24 小時
+const PER_FEED = 25;
+
+async function fetchFeed({ source, url }: (typeof FEEDS)[number]): Promise<NewsItem[]> {
   const res = await fetch(url, {
     cache: "no-store",
-    headers: { Accept: "application/json", "User-Agent": "Mozilla/5.0 my-ai-email" },
+    headers: { "User-Agent": "Mozilla/5.0 my-ai-email" },
   });
-  const text = await res.text();
-  // 證交所在請求過於頻繁時會回傳 HTML 封鎖頁，而不是 JSON
-  if (!res.ok || !text.trimStart().startsWith("{")) {
-    if (retries > 0) {
-      await sleep(1500);
-      return fetchTwseMonth(stockNo, yyyymm01, retries - 1);
-    }
-    throw new Error(
-      `證交所 API 回傳非 JSON（HTTP ${res.status}），可能是請求過於頻繁被暫時封鎖，請稍後再試`,
-    );
-  }
-  const j = JSON.parse(text);
-  if (j.stat !== "OK") return [] as string[][];
-  return j.data as string[][];
-}
-
-// 前一交易日股價當天不會變，記憶體快取一天；同時進來的請求共用同一個 Promise
-const stockCache = new Map<string, Promise<StockDay>>();
-
-/** 抓「今天以前」最近一個交易日（昨天若休市就往前找），每天只打一次證交所 */
-export function getPrevTradingDay(stockNo = "2330"): Promise<StockDay> {
-  const key = `${stockNo}:${taipeiDate()}`;
-  let p = stockCache.get(key);
-  if (!p) {
-    stockCache.clear(); // 只保留當天
-    p = fetchPrevTradingDay(stockNo).catch((e) => {
-      stockCache.delete(key); // 失敗不快取，下次重試
-      throw e;
-    });
-    stockCache.set(key, p);
-  }
-  return p;
-}
-
-async function fetchPrevTradingDay(stockNo: string): Promise<StockDay> {
-  const today = taipeiDate();
-  const [y, m] = today.split("-").map(Number);
-  const thisMonth = `${y}${String(m).padStart(2, "0")}01`;
-  const py = m === 1 ? y - 1 : y;
-  const pm = m === 1 ? 12 : m - 1;
-  const prevMonth = `${py}${String(pm).padStart(2, "0")}01`;
-
-  let rows = (await fetchTwseMonth(stockNo, thisMonth)).filter(
-    (r) => rocToIso(r[0]) < today,
-  );
-  if (rows.length === 0) {
-    rows = (await fetchTwseMonth(stockNo, prevMonth)).filter(
-      (r) => rocToIso(r[0]) < today,
-    );
-  }
-  const r = rows.at(-1);
-  if (!r) throw new Error("找不到前一個交易日資料");
-  return {
-    stockNo,
-    name: "台積電",
-    date: rocToIso(r[0]),
-    open: num(r[3]),
-    high: num(r[4]),
-    low: num(r[5]),
-    close: num(r[6]),
-    change: num(r[7]),
-    volume: num(r[1]),
-  };
-}
-
-// ---------- 科技新聞：RSS ----------
-
-export type NewsItem = { title: string; link: string; pubDate: string };
-
-const RSS_URL = "https://technews.tw/feed/";
-
-export async function getTechNews(limit = 8): Promise<NewsItem[]> {
-  const res = await fetch(RSS_URL, { cache: "no-store" });
-  if (!res.ok) throw new Error(`RSS ${res.status}`);
+  if (!res.ok) throw new Error(`${source} RSS ${res.status}`);
   const feed = await new Parser().parseString(await res.text());
-  const today = taipeiDate();
   const items = feed.items
     .filter((i) => i.title && i.link && i.isoDate)
-    .map((i) => ({ title: i.title!, link: i.link!, pubDate: i.isoDate! }));
-  const todays = items.filter((i) => taipeiDate(new Date(i.pubDate)) === today);
-  // 今天若還沒有新聞，就退回最新幾則
-  return (todays.length ? todays : items).slice(0, limit);
+    .map((i) => ({ title: i.title!.trim(), link: i.link!, pubDate: i.isoDate!, source }));
+  const since = Date.now() - NEWS_WINDOW_MS;
+  const recent = items.filter((i) => new Date(i.pubDate).getTime() >= since);
+  // 這個來源 24 小時內沒新聞，就退回最新幾則
+  return (recent.length ? recent : items.slice(0, 5)).slice(0, PER_FEED);
+}
+
+/** 所有來源合併、去重、新到舊；任一來源失敗不影響其他來源，全部失敗才算失敗 */
+export async function getNews(): Promise<NewsItem[]> {
+  const results = await Promise.allSettled(FEEDS.map(fetchFeed));
+  const ok = results.flatMap((r) => (r.status === "fulfilled" ? r.value : []));
+  if (!ok.length) {
+    const reasons = results.map((r) => (r.status === "rejected" ? String(r.reason?.message ?? r.reason) : ""));
+    throw new Error(`所有新聞來源都失敗：${reasons.filter(Boolean).join("；")}`);
+  }
+  const seen = new Set<string>();
+  return ok
+    .filter((i) => !seen.has(i.title) && (seen.add(i.title), true))
+    .sort((a, b) => b.pubDate.localeCompare(a.pubDate));
 }
 
 // ---------- OpenAI 統整 ----------
 
 export type Summary = {
   weatherSummary: string;
-  stockSummary: string;
-  newsSummary: { title: string; summary: string; link: string }[];
+  marketSummary?: string;
+  /** 舊紀錄才有（台積電區塊已改成市場區塊） */
+  stockSummary?: string;
+  newsSummary: NewsPick[];
   encouragement: string;
 };
 
+export type NewsPick = {
+  title: string;
+  summary: string;
+  link: string;
+  scope?: "國際" | "台灣"; // 舊紀錄沒有
+  category?: "科技" | "資安" | "金融";
+};
+
+/** 給 AI 看的市場資料：把日期的意義講清楚，避免誤判是哪一天的行情 */
+function describeMarket(m: Market) {
+  return {
+    台指期夜盤: m.night && {
+      交易時段: `${m.night.sessionStart ?? "前一交易日"} 15:00 ~ ${m.night.date} 05:00（台北時間）`,
+      合約: m.night.contract,
+      開: m.night.open,
+      高: m.night.high,
+      低: m.night.low,
+      收: m.night.close,
+      漲跌點數: m.night.change,
+      漲跌幅百分比: m.night.changePct,
+      成交量口數: m.night.volume,
+    },
+    費城半導體指數: m.sox && { 美國交易日: m.sox.date, ...quoteFields(m.sox) },
+    道瓊工業指數: m.dji && { 美國交易日: m.dji.date, ...quoteFields(m.dji) },
+  };
+}
+
+const quoteFields = (q: Quote) => ({
+  開: q.open,
+  高: q.high,
+  低: q.low,
+  收: q.close,
+  漲跌點數: q.change,
+  漲跌幅百分比: q.changePct,
+});
+
 export async function summarize(input: {
   weather: Weather | null;
-  stock: StockDay | null;
+  market: Market;
   news: NewsItem[];
 }): Promise<Summary> {
+  const { market, news, weather } = input;
+  const payload = {
+    今天日期: taipeiDate(),
+    weather,
+    market: describeMarket(market),
+    news: news.map(({ title, link, source }) => ({ title, link, source })),
+  };
   const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
   const completion = await client.chat.completions.create({
     model: process.env.OPENAI_MODEL ?? "gpt-5-mini",
@@ -189,15 +179,30 @@ export async function summarize(input: {
         content:
           "你是一位溫暖的每日晨報助理，使用繁體中文。根據使用者提供的資料，回傳 JSON，欄位為：" +
           "weatherSummary（今日天氣重點與穿著/帶傘建議）、" +
-          "stockSummary（台積電前一交易日股價表現簡評，勿給投資建議）、" +
-          "newsSummary（陣列，挑 3~5 則重點科技新聞，每則含 title、summary、link）、" +
+          "marketSummary（4~6 句：先依 market 說明前一晚台指期夜盤、費城半導體、道瓊的概況與漲跌幅；" +
+          "再綜合判斷今天台股開盤與盤勢可能偏多、偏空或震盪，並點出費半對半導體/電子權值股的連動；" +
+          "要寫出資料日期，若資料日期不是最近一晚請提醒可能尚未更新；屬推估、勿給個股買賣建議）、" +
+          "newsSummary（陣列，從 news 挑 5~6 則，每則含 title、summary（1~2 句說明重點與影響）、link、" +
+          "scope（\"國際\" 或 \"台灣\"）、category（\"科技\"、\"資安\" 或 \"金融\"）。" +
+          "只挑重大、影響層面廣的科技、資安、金融新聞，依下列優先順序排列：" +
+          "第一優先是影響國際層面的重大新聞（如大型科技公司與 AI 產業動向、跨國資安事件與重大漏洞、全球金融市場與央行政策）；" +
+          "第二優先才是影響台灣的重大新聞（如台灣半導體與科技產業、本地重大資安事件、台灣金融市場與政策）。" +
+          "個別公司的例行月營收/財報快訊、樂透開獎、產品小改版、生活娛樂與健康美容等不要選，除非真的沒有其他可選。" +
+          "同一事件只選一則。title 與 link 必須原封不動取自 news，不可自行編造）、" +
           "encouragement（結合上述資訊，寫一段 2~3 句鼓勵我的話）。資料為 null 代表取得失敗，請略過該部分並註明。",
       },
-      { role: "user", content: JSON.stringify(input) },
+      { role: "user", content: JSON.stringify(payload) },
     ],
   });
   const text = completion.choices[0]?.message?.content ?? "{}";
-  return JSON.parse(text) as Summary;
+  const summary = JSON.parse(text) as Summary;
+  // 只保留真的在來源裡的連結，避免 AI 編出不存在的新聞
+  const links = new Set(news.map((n) => n.link));
+  const rank = (n: NewsPick) => (n.scope === "台灣" ? 1 : 0);
+  summary.newsSummary = (summary.newsSummary ?? [])
+    .filter((n) => links.has(n.link))
+    .sort((x, y) => rank(x) - rank(y)); // 國際優先；同層級維持 AI 排的重要性順序
+  return summary;
 }
 
 // ---------- 組合整份晨報 ----------
@@ -205,17 +210,19 @@ export async function summarize(input: {
 export type DailyBrief = {
   date: string;
   weather: Weather | null;
-  stock: StockDay | null;
+  market: Market;
   news: NewsItem[];
   summary: Summary | null;
   errors?: Record<string, string>;
 };
 
 export async function buildDailyBrief(): Promise<DailyBrief> {
-  const [weather, stock, news] = await Promise.allSettled([
+  const [weather, night, sox, dji, news] = await Promise.allSettled([
     getWeather(),
-    getPrevTradingDay("2330"),
-    getTechNews(),
+    getNightFutures(),
+    getUSIndex("^SOX"),
+    getUSIndex("^DJI"),
+    getNews(),
   ]);
 
   const errors: Record<string, string> = {};
@@ -227,7 +234,11 @@ export async function buildDailyBrief(): Promise<DailyBrief> {
 
   const data = {
     weather: pick("weather", weather),
-    stock: pick("stock", stock),
+    market: {
+      night: pick("night", night),
+      sox: pick("sox", sox),
+      dji: pick("dji", dji),
+    },
     news: pick("news", news) ?? [],
   };
 

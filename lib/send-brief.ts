@@ -43,7 +43,7 @@ async function saveRecord(
       error: result.error,
       briefDate: brief.date,
       weather: brief.weather,
-      stock: brief.stock,
+      market: brief.market,
       news: brief.news,
       summary: brief.summary,
       briefErrors: brief.errors,
