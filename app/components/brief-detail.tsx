@@ -1,5 +1,5 @@
 import type { NewsItem, StockDay, Summary, Weather } from "@/lib/daily-brief";
-import type { Market, Quote } from "@/lib/market";
+import { nightSessionLabel, type Market, type Quote } from "@/lib/market";
 
 export type BriefData = {
   weather: Weather | null;
@@ -179,7 +179,7 @@ export default function BriefDetail({ brief }: { brief: BriefData }) {
                 name="台指期夜盤"
                 sub={
                   market?.night
-                    ? `${market.night.sessionStart ? `${md(market.night.sessionStart)} 15:00 ~ ` : ""}${md(market.night.date)} 05:00・${market.night.volume.toLocaleString()} 口`
+                    ? `${nightSessionLabel(market.night)}・${market.night.volume.toLocaleString()} 口`
                     : undefined
                 }
                 quote={market?.night}

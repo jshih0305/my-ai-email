@@ -18,8 +18,34 @@ export type Quote = {
 export type NightFutures = Quote & {
   contract: string; // 合約月份，例如 202611
   volume: number; // 口
-  sessionStart: string | null; // 夜盤開始那天（前一個交易日）15:00，到 date 當天 05:00
+  sessionStart: string | null; // 夜盤開始那天（前一個交易日）15:00，到隔天（日曆日）05:00
 };
+
+/** YYYY-MM-DD 加一天（日曆日） */
+function nextDay(d: string): string {
+  const t = new Date(`${d}T00:00:00Z`);
+  t.setUTCDate(t.getUTCDate() + 1);
+  return t.toISOString().slice(0, 10);
+}
+
+/**
+ * 夜盤實際交易時段（台北時間）。注意：夜盤收在開盤隔天 05:00，
+ * 不是 date（下一個交易日）—— 週五夜盤是週五 15:00 ~ 週六 05:00，但 date 會是下週一。
+ */
+export function nightSession(n: Pick<NightFutures, "date" | "sessionStart">) {
+  return {
+    start: n.sessionStart,
+    end: n.sessionStart ? nextDay(n.sessionStart) : n.date,
+  };
+}
+
+const md = (d: string) => d.slice(5).replace("-", "/");
+
+/** 顯示用：「11/06 15:00 ~ 11/07 05:00」 */
+export function nightSessionLabel(n: Pick<NightFutures, "date" | "sessionStart">): string {
+  const { start, end } = nightSession(n);
+  return `${start ? `${md(start)} 15:00 ~ ` : ""}${md(end)} 05:00`;
+}
 
 export type Market = {
   night: NightFutures | null;

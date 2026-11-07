@@ -1,5 +1,5 @@
 import type { DailyBrief } from "@/lib/daily-brief";
-import type { Quote } from "@/lib/market";
+import { nightSessionLabel, type Quote } from "@/lib/market";
 
 // 所有外部文字都要跳脫，避免破壞 HTML
 const esc = (v: unknown) =>
@@ -120,7 +120,7 @@ export function renderBriefEmail(b: DailyBrief): { subject: string; html: string
       ${marketRow(
         "台指期夜盤",
         n &&
-          `${n.sessionStart ? `${md(n.sessionStart)} 15:00 ~ ` : ""}${md(n.date)} 05:00・${n.volume.toLocaleString()} 口`,
+          `${nightSessionLabel(n)}・${n.volume.toLocaleString()} 口`,
         n,
         errors?.night,
       )}
